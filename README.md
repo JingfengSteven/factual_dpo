@@ -1,3 +1,6 @@
+# Factual DPO
+This is a fork of DPO to support fine-tuning language models for factuality (FactTune). See the main code base [here](https://github.com/kttian/llm_factuality_tuning) and paper [here](https://arxiv.org/abs/2311.08401).
+
 # DPO: Direct Preference Optimization
 
 **New:** in addition to the original DPO algorithm, this repo now supports ['conservative' DPO](https://ericmitchell.ai/cdpo.pdf) and [IPO](https://arxiv.org/pdf/2310.12036.pdf).
