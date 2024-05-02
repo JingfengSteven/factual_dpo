@@ -1,3 +1,5 @@
+fact_tune_dir: ${oc.env:FACT_TUNE_DIR, "llm_factuality_tuning"}
+
 # random seed for batch sampling
 seed: 0
 
@@ -20,11 +22,27 @@ fsdp_port: null
 datasets:
 - hh
 
+data_prep:
+  reward_mode: "factscore_avg"
+  num_sft_targets: 10
+  reward_diff_thresh: 0.0
+  reward_version: null
+  model_name_or_path: null 
+  DEFAULT_SYSTEM_PROMPT: "You are an intelligent, honest, and harmless assistant. Your direct, concise responses contain only the minimum words needed to convey the answer."
+  DEFAULT_SYSTEM_PROMPT_LOC: ${fact_tune_dir}/system_prompt_concise.txt
+  reward_file_train: ??? # default: ${fact_tune_dir}/data/dataset_bio/rewards/rewards_train_288.json
+  reward_file_test: ???  # default: ${fact_tune_dir}/data/dataset_bio/rewards/rewards_dpoval_10.json"
+
+summary_dir: ${fact_tune_dir}/eval/run_summaries
+
+# evaluate and save model every eval_every steps
+eval_every: ???
+
 # wandb configuration
 wandb:
   enabled: true
   entity: null
-  project: "direct-preference-optimization"
+  project: "factual_dpo"
 
 # to create the local run directory and cache models/datasets,
 #   we will try each of these directories in order; if none exist,
@@ -84,9 +102,6 @@ warmup_steps: 150
 
 # whether or not to use activation/gradient checkpointing
 activation_checkpointing: false
-
-# evaluate and save model every eval_every steps
-eval_every: 20_000
 
 # prevent wandb from logging more than once per minimum_log_interval_secs
 minimum_log_interval_secs: 1.0

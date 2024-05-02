@@ -9,6 +9,8 @@ import random
 from bs4 import BeautifulSoup, NavigableString
 import numpy as np
 from typing import Dict, List, Optional, Iterator, Callable, Union, Tuple
+import json
+import os
 
 
 def extract_anthropic_prompt(prompt_and_response):
@@ -159,8 +161,104 @@ def get_hh(split: str, silent: bool = False, cache_dir: str = None) -> Dict[str,
 
     return data
 
+# DEFAULT_SYSTEM_PROMPT = "You are an intelligent, honest, and harmless assistant. Your direct, concise responses contain only the minimum words needed to convey the answer."
+def sft_prompt(name):
+    return f"Here is a biography of {name}."
 
-def get_dataset(name: str, split: str, silent: bool = False, cache_dir: str = None):
+def chat_prompt(name):
+    return f"Write me a paragraph biography of {name}."
+
+def get_llama2_prompt(regular_prompt, system_prompt=None):
+    if system_prompt:
+        return f"[INST] <<SYS>>\n{system_prompt}\n<</SYS>>\n\n{regular_prompt} [/INST]"
+    else:
+        return f"[INST] {regular_prompt} [/INST]"
+
+
+def get_fact_tune_dataset(split, dataset, data_prep_args):
+    reward_mode = data_prep_args.reward_mode
+    reward_diff_thresh = data_prep_args.reward_diff_thresh
+    num_sft_targets = data_prep_args.num_sft_targets
+    model_name_or_path = data_prep_args.model_name_or_path
+    DEFAULT_SYSTEM_PROMPT_LOC = data_prep_args.DEFAULT_SYSTEM_PROMPT_LOC
+    DEFAULT_SYSTEM_PROMPT = data_prep_args.DEFAULT_SYSTEM_PROMPT
+    # read from DEFAULT_SYSTEM_PROMPT_LOC 
+    if DEFAULT_SYSTEM_PROMPT_LOC is None:
+        DEFAULT_SYSTEM_PROMPT_LOC = os.path.join(os.environ["FACT_TUNE_DIR"], "system_prompt_concise.txt")
+    if os.path.exists(DEFAULT_SYSTEM_PROMPT_LOC):
+        with open(DEFAULT_SYSTEM_PROMPT_LOC, 'r') as f:
+            DEFAULT_SYSTEM_PROMPT = f.read().strip()
+    reward_version = data_prep_args.reward_version
+    reward_file_train = data_prep_args.reward_file_train
+    reward_file_test = data_prep_args.reward_file_test
+    if split == "train":
+        rewards_file = reward_file_train
+    else:
+        rewards_file = reward_file_test
+    print("REWARDS FILE:")
+    print(rewards_file)
+    print("DEFAULT_SYSTEM_PROMPT_LOC:", DEFAULT_SYSTEM_PROMPT_LOC)
+    print("DEFAULT_SYSTEM_PROMPT:", DEFAULT_SYSTEM_PROMPT)
+
+    ''' This function loads the Biography or MedQA dataset from a given rewards file path 
+    and convert it to the necessary format for DPO. 
+    
+    rewards_obj: {
+        TOPIC: {
+            Q1: {responses: [], factscore_avg: [], aq_entropy_avg: []},
+            Q2: {responses: [], factscore_avg: [], aq_entropy_avg: []},
+            ...2
+            },
+        TOPIC: ...
+    
+    '''
+
+    with open(rewards_file, 'r') as f:
+        rewards_obj = json.load(f)
+        
+    data = defaultdict(lambda: defaultdict(list))
+    t_i = 0
+    all_pairs_count = 0
+    for topic in rewards_obj:
+        for question in rewards_obj[topic]:
+            prompt = question
+            if model_name_or_path.endswith('-chat-hf'):
+                print("IS CHAT MODEL, use special prompt")
+                # if dataset is bio, need to turn topic into a question for the chat prompt
+                # for medicine, the prompt is already a question 
+                if dataset == "bio":
+                    assert prompt == sft_prompt(topic)
+                    prompt = chat_prompt(topic)
+                prompt = get_llama2_prompt(prompt, system_prompt=DEFAULT_SYSTEM_PROMPT)
+                if t_i == 0:
+                    print("example prompt:", prompt)
+            responses = [' ' + resp for resp in rewards_obj[topic][question]["responses"]]
+            rewards = rewards_obj[topic][question][reward_mode]
+            n = len(rewards)
+            for i in range(n):
+                for j in range(i+1, n):
+                    if rewards[i] > rewards[j] + reward_diff_thresh:
+                        data[prompt]['pairs'].append((i, j))
+                        all_pairs_count += 1
+                    elif rewards[j] > rewards[i] + reward_diff_thresh:
+                        data[prompt]['pairs'].append((j, i))
+                        all_pairs_count += 1
+                    # else: if rewards are equal, exclude from preference pairs 
+            if num_sft_targets == 1:
+                data[prompt]["sft_target"] = responses[np.argmax(rewards)]
+            else:
+                data[prompt]['sft_target'] = responses
+            data[prompt]['responses'] = responses
+        t_i += 1 
+
+    ex_resp = responses[0]
+    print("example response:", ex_resp)
+    print("all pairs count:", all_pairs_count)
+    print("len data:", len(data))
+    return data
+
+
+def get_dataset(name: str, split: str, silent: bool = False, cache_dir: str = None, data_prep_args = None):
     """Load the given dataset by name. Supported by default are 'shp', 'hh', and 'se'."""
     if name == 'shp':
         data = get_shp(split, silent=silent, cache_dir=cache_dir)
@@ -168,6 +266,8 @@ def get_dataset(name: str, split: str, silent: bool = False, cache_dir: str = No
         data = get_hh(split, silent=silent, cache_dir=cache_dir)
     elif name == 'se':
         data = get_se(split, silent=silent, cache_dir=cache_dir)
+    elif name == "med_lfqa" or name == "bio":
+        data = get_fact_tune_dataset(split, dataset=name, data_prep_args=data_prep_args)
     else:
         raise ValueError(f"Unknown dataset '{name}'")
 
@@ -211,7 +311,8 @@ def get_collate_fn(tokenizer) -> Callable[[List[Dict]], Dict[str, Union[List, to
     return collate_fn
 
 
-def tokenize_batch_element(prompt: str, chosen: str, rejected: str, truncation_mode: str, tokenizer, max_length: int, max_prompt_length: int) -> Dict:
+def tokenize_batch_element(prompt: str, chosen: str, rejected: str, truncation_mode: str, tokenizer, 
+                           max_length: int, max_prompt_length: int) -> Dict:
     """Tokenize a single batch element.
     
        At this stage, we don't convert to PyTorch tensors yet; we just handle the truncation
@@ -289,7 +390,8 @@ def get_batch_iterator(names: List[str],
                        n_examples: Optional[int] = None,
                        seed:int = 0,
                        silent: bool = False,
-                       cache_dir: Optional[str] = None) -> Iterator[Dict]:
+                       cache_dir: Optional[str] = None,
+                       data_prep_args = None) -> Iterator[Dict]:
     """Get an iterator over batches of data. Stops after n_epochs or n_examples, whichever comes first.
 
     Args:
@@ -300,7 +402,8 @@ def get_batch_iterator(names: List[str],
         shuffle: Whether to shuffle the data after each epoch.
         max_length: Maximum length of the combined prompt + response.
         max_prompt_length: Maximum length of the prompt.
-        sft_mode: Whether to use SFT mode (i.e., return sft_target instead of chosen/rejected). In sft mode, we just return chosen_input_ids, but they contain the sft_target.
+        sft_mode: Whether to use SFT mode (i.e., return sft_target instead of chosen/rejected). 
+                  In sft mode, we just return chosen_input_ids, but they contain the sft_target.
         n_epochs: Number of epochs to run for. This or n_examples must be specified.
         n_examples: Number of examples to run for. This or n_epochs must be specified.
         seed: Random seed.
@@ -317,8 +420,18 @@ def get_batch_iterator(names: List[str],
         flat_data = []
         for name in names:
             truncation_mode = 'keep_end' if name == 'hh' else 'keep_start'
-            for prompt, data in get_dataset(name, split, silent=silent, cache_dir=cache_dir).items():
-                flat_data.append((prompt, data['responses'], data['pairs'], data['sft_target'], truncation_mode))
+            for prompt, data in get_dataset(name, split, silent=silent, cache_dir=cache_dir, 
+                                            data_prep_args=data_prep_args).items():
+                # append to flat data depending on training mode and num_sft_targets
+                if not sft_mode or type(data['sft_target']) == str:
+                    # if dpo mode or num_sft_targets == 1
+                    flat_data.append((prompt, data['responses'], data['pairs'], data['sft_target'], truncation_mode))
+                elif type(data['sft_target']) == list:
+                    for sft_target in data['sft_target']:
+                        flat_data.append((prompt, data['responses'], data['pairs'], sft_target, truncation_mode))
+                else:
+                    raise ValueError(f"Unexpected type for data['sft_target']: {type(data['sft_target'])}")                    
+        print("LENGTH FLAT DATA:", len(flat_data))
 
     collate_fn = get_collate_fn(tokenizer)
 
@@ -339,7 +452,8 @@ def get_batch_iterator(names: List[str],
             if done:
                 break
             if sft_mode:
-                batch_element = tokenize_batch_element(prompt, sft_target, sft_target, truncation_mode, tokenizer, max_length, max_prompt_length)
+                batch_element = tokenize_batch_element(prompt, sft_target, sft_target, truncation_mode, tokenizer, 
+                                                       max_length, max_prompt_length)
                 batch_element = {k: v for k, v in batch_element.items() if 'rejected' not in k}
                 batch.append(batch_element)
                 example_idx += 1
@@ -351,11 +465,12 @@ def get_batch_iterator(names: List[str],
                         done = True
 
                     batch = []
-            else:
+            else: # dpo mode
                 for p in pairs:
                     if done:
                         break
-                    batch_element = tokenize_batch_element(prompt, responses[p[0]], responses[p[1]], truncation_mode, tokenizer, max_length, max_prompt_length)
+                    batch_element = tokenize_batch_element(prompt, responses[p[0]], responses[p[1]], truncation_mode, 
+                                                           tokenizer, max_length, max_prompt_length)
                     batch.append(batch_element)
                     example_idx += 1
                     if len(batch) == batch_size:

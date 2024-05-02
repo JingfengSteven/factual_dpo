@@ -157,7 +157,9 @@ class BasicTrainer(object):
 
         tokenizer_name_or_path = config.model.tokenizer_name_or_path or config.model.name_or_path
         rank0_print(f'Loading tokenizer {tokenizer_name_or_path}')
-        self.tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_name_or_path, cache_dir=get_local_dir(config.local_dirs))
+        self.tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_name_or_path, 
+                                                                    cache_dir=get_local_dir(config.local_dirs), 
+                                                                    use_auth_token=config.model.auth_token)
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
@@ -173,9 +175,14 @@ class BasicTrainer(object):
         self.policy = policy
         self.reference_model = reference_model
 
-        self.train_iterator = get_batch_iterator(**data_iterator_kwargs, split='train', n_epochs=config.n_epochs, n_examples=config.n_examples, batch_size=config.batch_size, silent=rank != 0, cache_dir=get_local_dir(config.local_dirs))
+        config.data_prep.model_name_or_path = config.model.name_or_path
+        self.train_iterator = get_batch_iterator(**data_iterator_kwargs, split='train', n_epochs=config.n_epochs, n_examples=config.n_examples, 
+                                                 batch_size=config.batch_size, silent=rank != 0, cache_dir=get_local_dir(config.local_dirs),
+                                                 data_prep_args=config.data_prep)
         rank0_print(f'Loaded train data iterator')
-        self.eval_iterator = get_batch_iterator(**data_iterator_kwargs, split='test', n_examples=config.n_eval_examples, batch_size=config.eval_batch_size, silent=rank != 0, cache_dir=get_local_dir(config.local_dirs))
+        self.eval_iterator = get_batch_iterator(**data_iterator_kwargs, split='test', n_examples=config.n_eval_examples, 
+                                                batch_size=config.eval_batch_size, silent=rank != 0, cache_dir=get_local_dir(config.local_dirs),
+                                                data_prep_args=config.data_prep)
         self.eval_batches = list(self.eval_iterator)
         rank0_print(f'Loaded {len(self.eval_batches)} eval batches of size {config.eval_batch_size}')
 
@@ -419,12 +426,13 @@ class BasicTrainer(object):
         self.write_state_dict(self.example_counter, policy_state_dict, metrics, 'policy.pt', output_dir)
         del policy_state_dict
 
-        optimizer_state_dict = self.optimizer.state_dict()
-        self.write_state_dict(self.example_counter, optimizer_state_dict, metrics, 'optimizer.pt', output_dir)
-        del optimizer_state_dict
+        # save space by only writing optimizer if you want to continue training
+        # optimizer_state_dict = self.optimizer.state_dict()
+        # self.write_state_dict(self.example_counter, optimizer_state_dict, metrics, 'optimizer.pt', output_dir)
+        # del optimizer_state_dict
 
-        scheduler_state_dict = self.scheduler.state_dict()
-        self.write_state_dict(self.example_counter, scheduler_state_dict, metrics, 'scheduler.pt', output_dir)
+        # scheduler_state_dict = self.scheduler.state_dict()
+        # self.write_state_dict(self.example_counter, scheduler_state_dict, metrics, 'scheduler.pt', output_dir)
 
 
 class FSDPTrainer(BasicTrainer):

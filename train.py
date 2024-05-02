@@ -26,6 +26,25 @@ def worker_main(rank: int, world_size: int, config: DictConfig, policy: nn.Modul
     if config.debug:
         wandb.init = lambda *args, **kwargs: None
         wandb.log = lambda *args, **kwargs: None
+    
+    local_run_dir = config.local_run_dir # local run dir has been computed 
+    time_project_name = local_run_dir.split('/')[-1] # project name with timestamp
+    print("project name with timestamp:", time_project_name)
+
+    # save a summary file of dpo training run with hostname, local run dir, and eval every
+    # used during evaluation to easily locate checkpoints per epoch to load and evaluate 
+    if config.summary_dir is None:
+        config.summary_dir = os.path.join(os.environ["FACT_TUNE_DIR"], "eval", "run_summaries")
+    print("summary dir:", config.summary_dir)
+    if config.summary_dir == "NA":
+        print("no summary file")
+    else:
+        summary_file = os.path.join(config.summary_dir, config.exp_name + ".txt")
+        print(f"summary file: {summary_file}")
+        with open(summary_file, 'w') as f:
+            f.write(f"host name: {socket.gethostname()}\n")
+            f.write(f"local run dir: {local_run_dir}\n")
+            f.write(f"eval every: {config.eval_every}\n")
 
     if rank == 0 and config.wandb.enabled:
         os.environ['WANDB_CACHE_DIR'] = get_local_dir(config.local_dirs)
@@ -81,14 +100,16 @@ def main(config: DictConfig):
     model_kwargs = {'device_map': 'balanced'} if config.trainer == 'BasicTrainer' else {}
     policy_dtype = getattr(torch, config.model.policy_dtype)
     policy = transformers.AutoModelForCausalLM.from_pretrained(
-        config.model.name_or_path, cache_dir=get_local_dir(config.local_dirs), low_cpu_mem_usage=True, torch_dtype=policy_dtype, **model_kwargs)
+        config.model.name_or_path, cache_dir=get_local_dir(config.local_dirs), low_cpu_mem_usage=True, 
+        torch_dtype=policy_dtype, use_auth_token=config.model.auth_token, **model_kwargs)
     disable_dropout(policy)
 
     if config.loss.name in {'dpo', 'ipo'}:
         print('building reference model')
         reference_model_dtype = getattr(torch, config.model.reference_dtype)
         reference_model = transformers.AutoModelForCausalLM.from_pretrained(
-            config.model.name_or_path, cache_dir=get_local_dir(config.local_dirs), low_cpu_mem_usage=True, torch_dtype=reference_model_dtype, **model_kwargs)
+            config.model.name_or_path, cache_dir=get_local_dir(config.local_dirs), low_cpu_mem_usage=True, 
+            torch_dtype=reference_model_dtype, **model_kwargs)
         disable_dropout(reference_model)
     else:
         reference_model = None
