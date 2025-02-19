@@ -79,16 +79,18 @@ def pad_to_length(tensor: torch.Tensor, length: int, pad_value: Union[int, float
         pad_size[dim] = length - tensor.size(dim)
         return torch.cat([tensor, pad_value * torch.ones(*pad_size, dtype=tensor.dtype, device=tensor.device)], dim=dim)
 
+def all_gather_if_needed(values, rank, world_size):
+    # Ensure the tensor is on the correct device (GPU)
+    values = values.to(torch.cuda.current_device()) if torch.cuda.is_available() else values.to('cpu')
 
-def all_gather_if_needed(values: torch.Tensor, rank: int, world_size: int) -> torch.Tensor:
-    """Gather and stack/cat values from all processes, if there are multiple processes."""
-    if world_size == 1:
-        return values
-
-    all_values = [torch.empty_like(values).to(rank) for _ in range(world_size)]
+    # Create a list to hold gathered values across GPUs
+    all_values = [torch.zeros_like(values) for _ in range(world_size)]
+    
+    # Perform the all_gather operation
     dist.all_gather(all_values, values)
-    cat_function = torch.cat if values.dim() > 0 else torch.stack
-    return cat_function(all_values, dim=0)
+    
+    return torch.cat(all_values, dim=0)
+
 
 
 def formatted_dict(d: Dict) -> Dict:
@@ -156,7 +158,7 @@ def init_distributed(rank: int, world_size: int, master_addr: str = 'localhost',
 class TemporarilySeededRandom:
     def __init__(self, seed):
         """Temporarily set the random seed, and then restore it when exiting the context."""
-        self.seed = seed
+        self.seed = 0
         self.stored_state = None
         self.stored_np_state = None
 

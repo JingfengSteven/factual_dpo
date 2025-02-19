@@ -1,0 +1,9 @@
+name_or_path: /home/luokaiwei/.cache/modelscope/hub/LLM-Research/Phi-3-mini-4k-instruct
+tokenizer_name_or_path: /home/luokaiwei/.cache/modelscope/hub/LLM-Research/Phi-3-mini-4k-instruct
+archive: null
+block_name: Phi3DecoderLayer
+
+policy_dtype: float32
+fsdp_policy_mp: null
+reference_dtype: float16
+auth_token: None

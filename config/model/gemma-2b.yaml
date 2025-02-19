@@ -1,0 +1,9 @@
+name_or_path: /home/luokaiwei/.cache/modelscope/hub/LLM-Research/gemma-2-2b-it
+tokenizer_name_or_path: /home/luokaiwei/.cache/modelscope/hub/LLM-Research/gemma-2-2b-it
+archive: null
+block_name: Gemma2DecoderLayer
+
+policy_dtype: float32
+fsdp_policy_mp: null
+reference_dtype: bfloat16
+auth_token: None

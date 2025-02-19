@@ -1,0 +1,3 @@
+host name: h800-10-0-1-4
+local run dir: /home/tmpfs_data/luokaiwei/phi3mini_dpopairsPN_gn0.5_2025-02-16_10-04-08_134455
+eval every: 4000

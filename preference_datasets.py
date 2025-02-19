@@ -161,6 +161,58 @@ def get_hh(split: str, silent: bool = False, cache_dir: str = None) -> Dict[str,
 
     return data
 
+def get_custom_dataset(dataset_filepath, split: str) -> Dict[str, Dict[str, Union[List[Tuple[int, int]], List[str], str]]]:
+    """Load a custom dataset and convert it to the necessary format for DPO.
+    
+    The dataset is converted to a dictionary with the following structure:
+    {
+        'prompt1': {
+            'responses': List[str],
+            'pairs': List[Tuple[int, int]],
+            'sft_target': str
+        },
+        'prompt2': {
+            ...
+        },
+    }
+    
+    Prompts should be structured as follows:
+      \n\nHuman: <prompt>\n\nAssistant:
+    The chosen response will be used as the preferred response in DPO.
+    """
+    if(split=="train"):
+        # filepath="/usr/project/xtmp/jc923/dpo_pairs_P_N_phi.json"
+        print(f'Loading custom dataset from {dataset_filepath}...')
+        with open(dataset_filepath, 'r') as f:
+            dataset = json.load(f)
+    else:
+        # filepath="/usr/project/xtmp/jc923/dpo_pairs_P_N_phi.json"
+        print(f'Loading custom dataset from {dataset_filepath}...')
+        with open(dataset_filepath, 'r') as f:
+            dataset = json.load(f)
+        
+    data = defaultdict(lambda: defaultdict(list))
+    num=0
+    for example in dataset:
+        num+=1
+        prompt = example['prompt']
+        preferred = example['preferred']
+        non_preferred = example['non_preferred']
+
+        responses = [preferred, non_preferred]
+        n_responses = len(data[prompt]['responses'])
+
+        # Create preference pairs
+        data[prompt]['pairs'].append((n_responses, n_responses + 1))
+        data[prompt]['responses'].extend(responses)
+
+        # The preferred response is used as the sft_target for DPO training
+        data[prompt]['sft_target'] = preferred
+
+    print('Processing complete')
+    
+    return data
+
 # DEFAULT_SYSTEM_PROMPT = "You are an intelligent, honest, and harmless assistant. Your direct, concise responses contain only the minimum words needed to convey the answer."
 def sft_prompt(name):
     return f"Here is a biography of {name}."
@@ -224,8 +276,7 @@ def get_fact_tune_dataset(split, dataset, data_prep_args):
             prompt = question
             if model_name_or_path.endswith('-chat-hf'):
                 print("IS CHAT MODEL, use special prompt")
-                # if dataset is bio, need to turn topic into a question for the chat prompt
-                # for medicine, the prompt is already a question 
+           
                 if dataset == "bio":
                     assert prompt == sft_prompt(topic)
                     prompt = chat_prompt(topic)
@@ -268,6 +319,9 @@ def get_dataset(name: str, split: str, silent: bool = False, cache_dir: str = No
         data = get_se(split, silent=silent, cache_dir=cache_dir)
     elif name == "med_lfqa" or name == "bio":
         data = get_fact_tune_dataset(split, dataset=name, data_prep_args=data_prep_args)
+    elif 'json' in name:
+        dataset_filepath = name
+        data = get_custom_dataset(dataset_filepath, split)
     else:
         raise ValueError(f"Unknown dataset '{name}'")
 
@@ -377,7 +431,6 @@ def tokenize_batch_element(prompt: str, chosen: str, rejected: str, truncation_m
 
     return batch
 
-
 def get_batch_iterator(names: List[str],
                        tokenizer,
                        split: str = 'train',
@@ -388,10 +441,11 @@ def get_batch_iterator(names: List[str],
                        sft_mode: bool = False,
                        n_epochs: Optional[int] = None,
                        n_examples: Optional[int] = None,
-                       seed:int = 0,
+                       seed: int = 0,
                        silent: bool = False,
                        cache_dir: Optional[str] = None,
-                       data_prep_args = None) -> Iterator[Dict]:
+                       data_prep_args=None,
+                       drop_last: bool = True) -> Iterator[Dict]:
     """Get an iterator over batches of data. Stops after n_epochs or n_examples, whichever comes first.
 
     Args:
@@ -409,6 +463,7 @@ def get_batch_iterator(names: List[str],
         seed: Random seed.
         silent: Whether to silence the progress bar(s).
         cache_dir: Directory to cache the datasets in.
+        drop_last: Whether to drop the last incomplete batch (default is True).
     """
     assert n_epochs is not None or n_examples is not None, "Must specify either n_epochs or n_examples"
     if silent:
@@ -422,68 +477,79 @@ def get_batch_iterator(names: List[str],
             truncation_mode = 'keep_end' if name == 'hh' else 'keep_start'
             for prompt, data in get_dataset(name, split, silent=silent, cache_dir=cache_dir, 
                                             data_prep_args=data_prep_args).items():
-                # append to flat data depending on training mode and num_sft_targets
                 if not sft_mode or type(data['sft_target']) == str:
-                    # if dpo mode or num_sft_targets == 1
                     flat_data.append((prompt, data['responses'], data['pairs'], data['sft_target'], truncation_mode))
                 elif type(data['sft_target']) == list:
                     for sft_target in data['sft_target']:
                         flat_data.append((prompt, data['responses'], data['pairs'], sft_target, truncation_mode))
                 else:
-                    raise ValueError(f"Unexpected type for data['sft_target']: {type(data['sft_target'])}")                    
+                    raise ValueError(f"Unexpected type for data['sft_target']: {type(data['sft_target'])}")
         print("LENGTH FLAT DATA:", len(flat_data))
+        
 
     collate_fn = get_collate_fn(tokenizer)
+    
+    dataset_size = len(flat_data)  
+    print(f"Dataset Size: {dataset_size}")
 
-    epoch_idx = 0
-    example_idx = 0
-    done = False
-    while True:
-        if n_epochs is not None and epoch_idx >= n_epochs:
-            if not silent:
-                print(f'Finished generating {n_epochs} epochs on {split} split')
-            break
-        if shuffle:
-            with TemporarilySeededRandom(next(permutation_seeds)):
-                random.shuffle(flat_data)
+    def batch_iterator():
+        epoch_idx = 0
+        example_idx = 0
+        done = False
 
-        batch = []
-        for prompt, responses, pairs, sft_target, truncation_mode in flat_data:
-            if done:
+        while True:
+            if n_epochs is not None and epoch_idx >= n_epochs:
+                if not silent:
+                    print(f'Finished generating {n_epochs} epochs on {split} split')
                 break
-            if sft_mode:
-                batch_element = tokenize_batch_element(prompt, sft_target, sft_target, truncation_mode, tokenizer, 
-                                                       max_length, max_prompt_length)
-                batch_element = {k: v for k, v in batch_element.items() if 'rejected' not in k}
-                batch.append(batch_element)
-                example_idx += 1
-                if len(batch) == batch_size:
-                    yield collate_fn(batch)
-                    if n_examples is not None and example_idx >= n_examples:
-                        if not silent:
-                            print(f'Finished generating {n_examples} examples on {split} split')
-                        done = True
 
-                    batch = []
-            else: # dpo mode
-                for p in pairs:
-                    if done:
-                        break
-                    batch_element = tokenize_batch_element(prompt, responses[p[0]], responses[p[1]], truncation_mode, 
-                                                           tokenizer, max_length, max_prompt_length)
+            if shuffle:
+                with TemporarilySeededRandom(next(permutation_seeds)):
+                    random.shuffle(flat_data)
+
+            batch = []
+            for prompt, responses, pairs, sft_target, truncation_mode in flat_data:
+                if done:
+                    break
+                if sft_mode:
+                    batch_element = tokenize_batch_element(prompt, sft_target, sft_target, truncation_mode, tokenizer, 
+                                                           max_length, max_prompt_length)
+                    batch_element = {k: v for k, v in batch_element.items() if 'rejected' not in k}
                     batch.append(batch_element)
                     example_idx += 1
                     if len(batch) == batch_size:
                         yield collate_fn(batch)
                         if n_examples is not None and example_idx >= n_examples:
                             if not silent:
-                                print(f'FINISHED {n_examples} EXAMPLES on {split} split')
+                                print(f'Finished generating {n_examples} examples on {split} split')
                             done = True
                         batch = []
-        if done:
-            break
+                else:
+                    for p in pairs:
+                        if done:
+                            break
+                        batch_element = tokenize_batch_element(prompt, responses[p[0]], responses[p[1]], truncation_mode, 
+                                                               tokenizer, max_length, max_prompt_length)
+                        batch.append(batch_element)
+                        example_idx += 1
+                        if len(batch) == batch_size:
+                            yield collate_fn(batch)
+                            if n_examples is not None and example_idx >= n_examples:
+                                if not silent:
+                                    print(f'FINISHED {n_examples} EXAMPLES on {split} split')
+                                done = True
+                            batch = []
+            # Ensure last incomplete batch is handled based on drop_last
+            if batch and not drop_last:
+                yield collate_fn(batch)
 
-        epoch_idx += 1
+            if done:
+                break
+
+            epoch_idx += 1
+
+    return dataset_size, batch_iterator() 
+
 
 
 def strings_match_up_to_spaces(str_a: str, str_b: str) -> bool:

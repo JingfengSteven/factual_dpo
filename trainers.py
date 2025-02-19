@@ -18,7 +18,7 @@ from torch.distributed.fsdp.api import FullStateDictConfig, FullOptimStateDictCo
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 import tensor_parallel as tp
 import contextlib
-
+import math
 from preference_datasets import get_batch_iterator
 from utils import (
     slice_and_move_batch_for_device,
@@ -41,6 +41,23 @@ import json
 import functools
 from typing import Optional, Dict, List, Union, Tuple
 
+class CosineWarmupScheduler:
+    def __init__(self, optimizer, warmup_steps, total_steps, min_lr=0.0):
+        self.optimizer = optimizer
+        self.warmup_steps = warmup_steps
+        self.total_steps = total_steps
+        self.min_lr = min_lr
+
+        self.scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer, lr_lambda=self.lr_lambda
+        )
+
+    def lr_lambda(self, step):
+        if step < self.warmup_steps:
+            return (step + 1) / (self.warmup_steps + 1)  
+        else:
+            progress = (step - self.warmup_steps) / (self.total_steps - self.warmup_steps)
+            return max(self.min_lr, 0.5 * (1 + math.cos(math.pi * progress)))  
 
 def preference_loss(policy_chosen_logps: torch.FloatTensor,
                     policy_rejected_logps: torch.FloatTensor,
@@ -87,7 +104,7 @@ def preference_loss(policy_chosen_logps: torch.FloatTensor,
     return losses, chosen_rewards, rejected_rewards
 
 
-def _get_batch_logps(logits: torch.FloatTensor, labels: torch.LongTensor, average_log_prob: bool = False) -> torch.FloatTensor:
+def _get_batch_logps(logits: torch.FloatTensor, labels: torch.LongTensor, average_log_prob: bool = True) -> torch.FloatTensor:
     """Compute the log probabilities of the given labels under the given logits.
 
     Args:
@@ -163,28 +180,43 @@ class BasicTrainer(object):
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
+        # Common data iterator kwargs for both train and eval
         data_iterator_kwargs = dict(
             names=config.datasets,
             tokenizer=self.tokenizer,
-            shuffle=True,
+            shuffle=True,  # Enable shuffling for both train and eval (if needed)
             max_length=config.max_length,
             max_prompt_length=config.max_prompt_length,
-            sft_mode=config.loss.name == 'sft',
+            sft_mode=config.loss.name == 'sft',  # Depending on loss mode
+            n_epochs=config.n_epochs,  # Set number of epochs
+            drop_last=True,  # Drop the last incomplete batch
+            silent=rank != 0,  # Silence logs if not rank 0
+            cache_dir=get_local_dir(config.local_dirs),  # Cache directory
+            data_prep_args=config.data_prep  # Data preparation arguments
         )
 
-        self.policy = policy
-        self.reference_model = reference_model
-
+        # Set model paths
         config.data_prep.model_name_or_path = config.model.name_or_path
-        self.train_iterator = get_batch_iterator(**data_iterator_kwargs, split='train', n_epochs=config.n_epochs, n_examples=config.n_examples, 
-                                                 batch_size=config.batch_size, silent=rank != 0, cache_dir=get_local_dir(config.local_dirs),
-                                                 data_prep_args=config.data_prep)
+
+        # Create the train iterator
+        self.train_dataset_size,self.train_iterator = get_batch_iterator(
+            **data_iterator_kwargs,  # Pass common kwargs
+            split='train',  # Override split for training
+            n_examples=config.n_examples,  # Number of examples for training
+            batch_size=config.batch_size  # Batch size for training
+        )
         rank0_print(f'Loaded train data iterator')
-        self.eval_iterator = get_batch_iterator(**data_iterator_kwargs, split='test', n_examples=config.n_eval_examples, 
-                                                batch_size=config.eval_batch_size, silent=rank != 0, cache_dir=get_local_dir(config.local_dirs),
-                                                data_prep_args=config.data_prep)
+
+        # Create the eval iterator
+        self.eval_dataset_size,self.eval_iterator = get_batch_iterator(
+            **data_iterator_kwargs,  # Pass common kwargs
+            split='test',  # Override split for evaluation
+            n_examples=config.n_eval_examples,  # Number of examples for evaluation
+            batch_size=config.eval_batch_size  # Batch size for evaluation
+        )
         self.eval_batches = list(self.eval_iterator)
         rank0_print(f'Loaded {len(self.eval_batches)} eval batches of size {config.eval_batch_size}')
+
 
     def get_batch_samples(self, batch: Dict[str, torch.LongTensor]) -> Tuple[str, str]:
         """Generate samples from the policy (and reference model, if doing DPO training) for the given batch of inputs."""
@@ -220,8 +252,12 @@ class BasicTrainer(object):
            We do this to avoid doing two forward passes, because it's faster for FSDP.
         """
         concatenated_batch = concatenated_inputs(batch)
+        if (concatenated_batch['concatenated_input_ids'].shape[0]==0):
+            print("empty batch")
+            return None, None
+
         all_logits = model(concatenated_batch['concatenated_input_ids'], attention_mask=concatenated_batch['concatenated_attention_mask']).logits.to(torch.float32)
-        all_logps = _get_batch_logps(all_logits, concatenated_batch['concatenated_labels'], average_log_prob=False)
+        all_logps = _get_batch_logps(all_logits, concatenated_batch['concatenated_labels'], average_log_prob=True)
         chosen_logps = all_logps[:batch['chosen_input_ids'].shape[0]]
         rejected_logps = all_logps[batch['chosen_input_ids'].shape[0]:]
         return chosen_logps, rejected_logps
@@ -235,21 +271,34 @@ class BasicTrainer(object):
 
         if loss_config.name in {'dpo', 'ipo'}:
             policy_chosen_logps, policy_rejected_logps = self.concatenated_forward(self.policy, batch)
+            if policy_chosen_logps is None or policy_rejected_logps is None:
+                print("Skipping batch due to empty log probabilities...")
+                return torch.tensor(0.0,requires_grad=True), metrics  # Return a default loss value
+
             with torch.no_grad():
                 reference_chosen_logps, reference_rejected_logps = self.concatenated_forward(self.reference_model, batch)
+                if reference_chosen_logps is None or reference_rejected_logps is None:
+                    print("Skipping batch due to empty reference log probabilities...")
+                    return torch.tensor(0.0,requires_grad=True), metrics  # Return a default loss value
 
             if loss_config.name == 'dpo':
-                loss_kwargs = {'beta': loss_config.beta, 'reference_free': loss_config.reference_free, 'label_smoothing': loss_config.label_smoothing, 'ipo': False}
+                loss_kwargs = {
+                    'beta': loss_config.beta,
+                    'reference_free': loss_config.reference_free,
+                    'label_smoothing': loss_config.label_smoothing,
+                    'ipo': False
+                }
             elif loss_config.name == 'ipo':
                 loss_kwargs = {'beta': loss_config.beta, 'ipo': True}
             else:
-                raise ValueError(f'unknown loss {loss_config.name}')
+                raise ValueError(f'Unknown loss {loss_config.name}')
 
             losses, chosen_rewards, rejected_rewards = preference_loss(
-                policy_chosen_logps, policy_rejected_logps, reference_chosen_logps, reference_rejected_logps, **loss_kwargs)
+                policy_chosen_logps, policy_rejected_logps, reference_chosen_logps, reference_rejected_logps, **loss_kwargs
+            )
 
             reward_accuracies = (chosen_rewards > rejected_rewards).float()
-
+            chosen_rewards = chosen_rewards.to("cpu")
             chosen_rewards = all_gather_if_needed(chosen_rewards, self.rank, self.world_size)
             rejected_rewards = all_gather_if_needed(rejected_rewards, self.rank, self.world_size)
             reward_accuracies = all_gather_if_needed(reward_accuracies, self.rank, self.world_size)
@@ -264,7 +313,7 @@ class BasicTrainer(object):
 
         elif loss_config.name == 'sft':
             policy_chosen_logits = self.policy(batch['chosen_input_ids'], attention_mask=batch['chosen_attention_mask']).logits.to(torch.float32)
-            policy_chosen_logps = _get_batch_logps(policy_chosen_logits, batch['chosen_labels'], average_log_prob=False)
+            policy_chosen_logps = _get_batch_logps(policy_chosen_logits, batch['chosen_labels'], average_log_prob=True)
 
             losses = -policy_chosen_logps
 
@@ -276,13 +325,21 @@ class BasicTrainer(object):
 
         return losses.mean(), metrics
 
+
     def train(self):
         """Begin either SFT or DPO training, with periodic evaluation."""
 
         rank0_print(f'Using {self.config.optimizer} optimizer')
         self.optimizer = getattr(torch.optim, self.config.optimizer)(self.policy.parameters(), lr=self.config.lr)
-        self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=lambda step: min(1.0, (step + 1) / (self.config.warmup_steps + 1)))
-    
+        #self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=lambda step: min(1.0, (step + 1) / (self.config.warmup_steps + 1)))
+        
+        
+        batch_size = self.config.batch_size
+        num_epochs = self.config.n_epochs
+        total_steps = (num_epochs * self.train_dataset_size * self.config.dataset_repeat) // (batch_size)
+        rank0_print(f'Total training steps: {total_steps}')
+        
+        self.scheduler=CosineWarmupScheduler(self.optimizer, warmup_steps=self.config.warmup_steps, total_steps=total_steps).scheduler
         torch.manual_seed(self.seed)
         np.random.seed(self.seed)
         random.seed(self.seed)
@@ -343,7 +400,7 @@ class BasicTrainer(object):
                         rank0_print(json.dumps(all_reference_samples[:10], indent=2))
 
                 if self.config.wandb.enabled and self.rank == 0:
-                    wandb.log(mean_eval_metrics, step=self.example_counter)
+                    wandb.log(mean_eval_metrics, step=self.batch_counter)
 
                     if self.config.sample_during_eval:
                         wandb.log({"policy_samples": policy_text_table}, step=self.example_counter)
@@ -373,7 +430,24 @@ class BasicTrainer(object):
                 for k, v in metrics.items():
                     batch_metrics[k].extend(v)
 
-            grad_norm = self.clip_gradient()
+            grad_before=self.clip_gradient()
+            
+            if self.config.norm_type == float('inf'):
+                local_grad_norm = max((p.grad.abs().max().item() for p in self.policy.parameters() if p.grad is not None), default=0.0)
+                local_grad_norm_tensor = torch.tensor(local_grad_norm, device=self.rank)
+                dist.all_reduce(local_grad_norm_tensor, op=dist.ReduceOp.MAX)  
+                grad_after = local_grad_norm_tensor.item()
+            else:
+                local_grad_norm_p = torch.tensor(0.0, device=self.rank)
+
+                for p in self.policy.parameters():
+                    if p.grad is not None:
+                        local_grad_norm_p += p.grad.norm(self.config.norm_type) ** self.config.norm_type 
+                dist.all_reduce(local_grad_norm_p, op=dist.ReduceOp.SUM)
+                grad_after = torch.pow(local_grad_norm_p, 1.0 / self.config.norm_type).item()
+                    
+            
+            
             self.optimizer.step()
             self.scheduler.step()
             self.optimizer.zero_grad()
@@ -381,10 +455,14 @@ class BasicTrainer(object):
             step_time = time.time() - start_time
             examples_per_second = self.config.batch_size / step_time
             batch_metrics['examples_per_second'].append(examples_per_second)
-            batch_metrics['grad_norm'].append(grad_norm)
+            batch_metrics['grad_norm_before'].append(grad_before)
+            batch_metrics['grad_norm_after'].append(grad_after)
+            # print(f">>>>>>>>>>>>>>>> LR {self.scheduler.get_last_lr()}")
+            batch_metrics["train/lr"].append(self.scheduler.get_last_lr()[0])
 
             self.batch_counter += 1
             self.example_counter += self.config.batch_size
+
 
             if last_log is None or time.time() - last_log > self.config.minimum_log_interval_secs:
                 mean_train_metrics = {k: sum(v) / len(v) for k, v in batch_metrics.items()}
@@ -393,7 +471,7 @@ class BasicTrainer(object):
                 rank0_print(f'train stats after {self.example_counter} examples: {formatted_dict(mean_train_metrics)}')
 
                 if self.config.wandb.enabled and self.rank == 0:
-                    wandb.log(mean_train_metrics, step=self.example_counter)
+                    wandb.log(mean_train_metrics, step=self.batch_counter)
 
                 last_log = time.time()
             else:
@@ -403,7 +481,8 @@ class BasicTrainer(object):
 
     def clip_gradient(self):
         """Clip the gradient norm of the parameters of a non-FSDP policy."""
-        return torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.config.max_grad_norm).item()
+
+        return torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.config.max_grad_norm,self.config.norm_type).item()
 
     def write_state_dict(self, step: int, state: Dict[str, torch.Tensor], metrics: Dict, filename: str, dir_name: Optional[str] = None):
         """Write a checkpoint to disk."""
@@ -500,7 +579,10 @@ class FSDPTrainer(BasicTrainer):
 
     def clip_gradient(self):
         """Clip the gradient norm of the parameters of an FSDP policy, gathering the gradients across all GPUs."""
-        return self.policy.clip_grad_norm_(self.config.max_grad_norm).item()
+        return self.policy.clip_grad_norm_(self.config.max_grad_norm,self.config.norm_type)
+        
+    
+
     
     def save(self, output_dir=None, metrics=None):
         """Save policy, optimizer, and scheduler state to disk, gathering from all processes and saving only on the rank 0 process."""

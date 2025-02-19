@@ -1,0 +1,58 @@
+fact_tune_dir: /home/luokaiwei/workplace/ASC/factual_dpo
+seed: 0
+exp_name: phi3mini_dpopairsPN_gn0.4
+batch_size: 32
+eval_batch_size: 32
+debug: false
+fsdp_port: null
+datasets:
+- /home/luokaiwei/workplace/ASC/Phi_3/train_pair/dpo_pairs_P_N.json
+data_prep:
+  reward_mode: factscore_avg
+  num_sft_targets: 10
+  reward_diff_thresh: 0.0
+  reward_version: null
+  model_name_or_path: null
+  DEFAULT_SYSTEM_PROMPT: null
+  DEFAULT_SYSTEM_PROMPT_LOC: ${fact_tune_dir}/system_prompt_concise.txt
+  reward_file_train: ${fact_tune_dir}/data/dataset_bio/rewards/rewards_train_288.json
+  reward_file_test: ${fact_tune_dir}/data/dataset_bio/rewards/rewards_dpoval_10.json"
+summary_dir: ${fact_tune_dir}/eval/run_summaries
+eval_every: 2000
+wandb:
+  enabled: true
+  entity: null
+  project: factual_dpo
+local_dirs:
+- /home/tmpfs_data
+sample_during_eval: false
+n_eval_model_samples: 8
+do_first_eval: true
+local_run_dir: ${get_local_run_dir:${exp_name},${local_dirs}}
+lr: 1.0e-06
+gradient_accumulation_steps: 2
+max_grad_norm: 0.4
+max_length: 1024
+max_prompt_length: 512
+n_epochs: 1
+n_examples: null
+n_eval_examples: 256
+trainer: FSDPTrainer
+optimizer: RMSprop
+warmup_steps: 150
+activation_checkpointing: false
+minimum_log_interval_secs: 1.0
+model:
+  name_or_path: /home/luokaiwei/.cache/modelscope/hub/LLM-Research/Phi-3-mini-4k-instruct
+  tokenizer_name_or_path: /home/luokaiwei/.cache/modelscope/hub/LLM-Research/Phi-3-mini-4k-instruct
+  archive: null
+  block_name: Phi3DecoderLayer
+  policy_dtype: float32
+  fsdp_policy_mp: bfloat16
+  reference_dtype: float16
+  auth_token: None
+loss:
+  name: dpo
+  beta: 0.1
+  label_smoothing: 0
+  reference_free: false

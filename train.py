@@ -5,6 +5,7 @@ import transformers
 from utils import get_local_dir, get_local_run_dir, disable_dropout, init_distributed, get_open_port
 import os
 import hydra
+from transformers import AutoModelForCausalLM
 import torch.multiprocessing as mp
 from omegaconf import OmegaConf, DictConfig
 import trainers
@@ -114,14 +115,46 @@ def main(config: DictConfig):
     else:
         reference_model = None
 
-    if config.model.archive is not None:
-        state_dict = torch.load(config.model.archive, map_location='cpu')
-        step, metrics = state_dict['step_idx'], state_dict['metrics']
-        print(f'loading pre-trained weights at step {step} from {config.model.archive} with metrics {json.dumps(metrics, indent=2)}')
-        policy.load_state_dict(state_dict['state'])
+    '''if config.model.archive is not None:
+        print(f'loading model from {config.model.archive}')
+        policy = transformers.AutoModelForCausalLM.from_pretrained(
+            config.model.archive, cache_dir=get_local_dir(config.local_dirs), low_cpu_mem_usage=True, 
+            torch_dtype=policy_dtype, use_auth_token=config.model.auth_token, **model_kwargs)
+        
         if config.loss.name in {'dpo', 'ipo'}:
-            reference_model.load_state_dict(state_dict['state'])
-        print('loaded pre-trained weights')
+            reference_model = transformers.AutoModelForCausalLM.from_pretrained(
+                config.model.archive, cache_dir=get_local_dir(config.local_dirs), low_cpu_mem_usage=True, 
+                torch_dtype=reference_model_dtype, **model_kwargs)
+        print('loaded model from archive')'''
+    if config.model.archive is not None:
+        print(f'Loading base model from {config.model.name_or_path}')
+        policy = transformers.AutoModelForCausalLM.from_pretrained(
+            config.model.name_or_path,
+            cache_dir=get_local_dir(config.local_dirs),
+            low_cpu_mem_usage=True,
+            torch_dtype=policy_dtype,
+            use_auth_token=config.model.auth_token,
+            **model_kwargs
+        )
+        
+        checkpoint_path = f"{config.model.archive}/policy.pt"
+        checkpoint_state_dict = torch.load(checkpoint_path, map_location="cpu")
+        policy.load_state_dict(checkpoint_state_dict['state'], strict=True)  
+        print(f'Loaded model weights from checkpoint: {checkpoint_path}')
+        
+
+        if config.loss.name in {'dpo', 'ipo'}:
+            reference_model = AutoModelForCausalLM.from_pretrained(
+                config.model.name_or_path,
+                cache_dir=get_local_dir(config.local_dirs),
+                low_cpu_mem_usage=True,
+                torch_dtype=reference_model_dtype,
+                **model_kwargs
+            )
+        
+            reference_model.load_state_dict(checkpoint_state_dict['state'], strict=True)
+            print(f'Loaded reference model weights from checkpoint: {checkpoint_path}')
+
     
     if 'FSDP' in config.trainer:
         world_size = torch.cuda.device_count()

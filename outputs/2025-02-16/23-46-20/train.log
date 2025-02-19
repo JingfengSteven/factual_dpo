@@ -1,0 +1,4 @@
+[2025-02-16 23:46:29,485][/home/luokaiwei/miniconda3/envs/ASC/lib/python3.9/site-packages/tensor_parallel/pretrained_model.py][WARNING] - Using automatic config: tensor parallel config not provided and no custom config registered for the model
+[2025-02-16 23:46:29,525][/home/luokaiwei/miniconda3/envs/ASC/lib/python3.9/site-packages/tensor_parallel/tensor_parallel.py][INFO] - Using automatic config: sharding individual linear/conv/emb layers
+[2025-02-16 23:46:34,229][/home/luokaiwei/miniconda3/envs/ASC/lib/python3.9/site-packages/tensor_parallel/pretrained_model.py][WARNING] - Using automatic config: tensor parallel config not provided and no custom config registered for the model
+[2025-02-16 23:46:34,231][/home/luokaiwei/miniconda3/envs/ASC/lib/python3.9/site-packages/tensor_parallel/tensor_parallel.py][INFO] - Using automatic config: sharding individual linear/conv/emb layers

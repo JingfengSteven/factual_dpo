@@ -1,0 +1,11 @@
+- model=phi-3-mini
+- datasets=[/home/luokaiwei/workplace/ASC/Phi_3/train_pair/dpo_pairs_P_N.json]
+- loss=dpo
+- loss.beta=0.1
+- exp_name=phi3mini_dpopairsPN_gn0.4
+- gradient_accumulation_steps=2
+- trainer=FSDPTrainer
+- max_grad_norm=0.4
+- norm_type=1
+- sample_during_eval=false
+- model.fsdp_policy_mp=bfloat16

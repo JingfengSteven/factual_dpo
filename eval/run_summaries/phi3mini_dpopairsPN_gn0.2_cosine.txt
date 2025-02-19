@@ -1,0 +1,3 @@
+host name: h800-10-0-1-4
+local run dir: /home/luokaiwei/model_zoo/luokaiwei/phi3mini_dpopairsPN_gn0.2_cosine_2025-02-18_21-48-57_956690
+eval every: 20000

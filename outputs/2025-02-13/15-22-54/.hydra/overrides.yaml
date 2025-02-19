@@ -1,0 +1,10 @@
+- model=llama3-8b-instruct
+- datasets=[custom_dataset]
+- loss=dpo
+- loss.beta=0.1
+- model.archive=/home/tmpfs_data/luokaiwei/anthropic_dpo_pythia28_2025-02-11_17-23-52_792496/step-3968/
+- exp_name=anthropic_dpo_pythia28
+- gradient_accumulation_steps=2
+- trainer=FSDPTrainer
+- sample_during_eval=false
+- model.fsdp_policy_mp=bfloat16

@@ -1,0 +1,3 @@
+host name: h800-10-0-1-4
+local run dir: /home/tmpfs_data/luokaiwei/anthropic_dpo_pythia28_2025-02-13_22-50-46_820095
+eval every: 4992

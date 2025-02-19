@@ -1,0 +1,10 @@
+name_or_path: "/dev/shm/luokaiwei/modelscope/hub/shakechen/Llama-2-7b-chat-hf"  # Path to your custom Llama model
+tokenizer_name_or_path: "/dev/shm/luokaiwei/modelscope/hub/shakechen/Llama-2-7b-chat-hf"  # Path to the tokenizer (same as model if not provided separately)
+archive: null
+block_name: LlamaDecoderLayer  # Llama block type
+
+policy_dtype: float32  # Default precision for policy model
+fsdp_policy_mp: null  # No mixed precision (can be changed if needed)
+reference_dtype: bfloat16  # Reference model dtype, used for mixed precision
+
+auth_token: None  # Not needed for local models

@@ -1,0 +1,10 @@
+- model=phi-3-mini
+- datasets=[custom_dataset]
+- loss=dpo
+- loss.beta=0.1
+- model.archive=/home/tmpfs_data/luokaiwei/anthropic_dpo_pythia28_2025-02-04_21-11-36_557645/step-9984/
+- exp_name=anthropic_dpo_pythia28
+- gradient_accumulation_steps=2
+- trainer=FSDPTrainer
+- sample_during_eval=false
+- model.fsdp_policy_mp=bfloat16

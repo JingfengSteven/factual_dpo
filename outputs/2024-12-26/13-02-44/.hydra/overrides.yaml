@@ -1,0 +1,9 @@
+- model=llama-2-7b-chat
+- datasets=[custom_dataset]
+- loss=dpo
+- loss.beta=0.1
+- exp_name=anthropic_dpo_pythia28
+- gradient_accumulation_steps=2
+- trainer=FSDPTrainer
+- sample_during_eval=false
+- model.fsdp_policy_mp=bfloat16
