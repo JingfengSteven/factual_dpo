@@ -63,7 +63,10 @@ def preference_loss(policy_chosen_logps: torch.FloatTensor,
                     policy_rejected_logps: torch.FloatTensor,
                     reference_chosen_logps: torch.FloatTensor,
                     reference_rejected_logps: torch.FloatTensor,
+                    chosen_lengths: torch.IntTensor,  
+                    rejected_lengths: torch.IntTensor,
                     beta: float,
+                    alpha: float = 0.01,
                     label_smoothing: float = 0.0,
                     ipo: bool = False,
                     reference_free: bool = False) -> Tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:
@@ -89,15 +92,18 @@ def preference_loss(policy_chosen_logps: torch.FloatTensor,
 
     if reference_free:
         ref_logratios = 0
-
-    logits = pi_logratios - ref_logratios  # also known as h_{\pi_\theta}^{y_w,y_l}
-
+    
+    length_penalty = alpha * (rejected_lengths - chosen_lengths)
+    
+    logits = pi_logratios - ref_logratios
+   
     if ipo:
         losses = (logits - 1/(2 * beta)) ** 2  # Eq. 17 of https://arxiv.org/pdf/2310.12036v2.pdf
     else:
         # Eq. 3 https://ericmitchell.ai/cdpo.pdf; label_smoothing=0 gives original DPO (Eq. 7 of https://arxiv.org/pdf/2305.18290.pdf)
-        losses = -F.logsigmoid(beta * logits) * (1 - label_smoothing) - F.logsigmoid(-beta * logits) * label_smoothing
-
+        losses = -F.logsigmoid(beta * logits-length_penalty) * (1 - label_smoothing) - F.logsigmoid(-beta * logits) * label_smoothing
+  
+        
     chosen_rewards = beta * (policy_chosen_logps - reference_chosen_logps).detach()
     rejected_rewards = beta * (policy_rejected_logps - reference_rejected_logps).detach()
 
@@ -274,7 +280,11 @@ class BasicTrainer(object):
             if policy_chosen_logps is None or policy_rejected_logps is None:
                 print("Skipping batch due to empty log probabilities...")
                 return torch.tensor(0.0,requires_grad=True), metrics  # Return a default loss value
+            # Compute tokenized sequence lengths of chosen and rejected responses
+            chosen_lengths = (batch['chosen_input_ids'] != self.tokenizer.pad_token_id).sum(dim=1)
+            rejected_lengths = (batch['rejected_input_ids'] != self.tokenizer.pad_token_id).sum(dim=1)
 
+            
             with torch.no_grad():
                 reference_chosen_logps, reference_rejected_logps = self.concatenated_forward(self.reference_model, batch)
                 if reference_chosen_logps is None or reference_rejected_logps is None:
@@ -294,7 +304,7 @@ class BasicTrainer(object):
                 raise ValueError(f'Unknown loss {loss_config.name}')
 
             losses, chosen_rewards, rejected_rewards = preference_loss(
-                policy_chosen_logps, policy_rejected_logps, reference_chosen_logps, reference_rejected_logps, **loss_kwargs
+                policy_chosen_logps, policy_rejected_logps, reference_chosen_logps, reference_rejected_logps,chosen_lengths,rejected_lengths, **loss_kwargs
             )
 
             reward_accuracies = (chosen_rewards > rejected_rewards).float()
