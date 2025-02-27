@@ -93,16 +93,15 @@ def preference_loss(policy_chosen_logps: torch.FloatTensor,
     if reference_free:
         ref_logratios = 0
     
-    length_penalty = alpha * (rejected_lengths - chosen_lengths)
-    
+    length_penalty = alpha * (rejected_lengths-chosen_lengths)
     logits = pi_logratios - ref_logratios
-   
+  #  print("length pen",length_penalty)
     if ipo:
         losses = (logits - 1/(2 * beta)) ** 2  # Eq. 17 of https://arxiv.org/pdf/2310.12036v2.pdf
     else:
         # Eq. 3 https://ericmitchell.ai/cdpo.pdf; label_smoothing=0 gives original DPO (Eq. 7 of https://arxiv.org/pdf/2305.18290.pdf)
         losses = -F.logsigmoid(beta * logits-length_penalty) * (1 - label_smoothing) - F.logsigmoid(-beta * logits) * label_smoothing
-  
+   # print("logit",beta * logits)
         
     chosen_rewards = beta * (policy_chosen_logps - reference_chosen_logps).detach()
     rejected_rewards = beta * (policy_rejected_logps - reference_rejected_logps).detach()
@@ -110,7 +109,7 @@ def preference_loss(policy_chosen_logps: torch.FloatTensor,
     return losses, chosen_rewards, rejected_rewards
 
 
-def _get_batch_logps(logits: torch.FloatTensor, labels: torch.LongTensor, average_log_prob: bool = True) -> torch.FloatTensor:
+def _get_batch_logps(logits: torch.FloatTensor, labels: torch.LongTensor, average_log_prob: bool = False) -> torch.FloatTensor:
     """Compute the log probabilities of the given labels under the given logits.
 
     Args:
@@ -263,7 +262,7 @@ class BasicTrainer(object):
             return None, None
 
         all_logits = model(concatenated_batch['concatenated_input_ids'], attention_mask=concatenated_batch['concatenated_attention_mask']).logits.to(torch.float32)
-        all_logps = _get_batch_logps(all_logits, concatenated_batch['concatenated_labels'], average_log_prob=True)
+        all_logps = _get_batch_logps(all_logits, concatenated_batch['concatenated_labels'], average_log_prob=False)
         chosen_logps = all_logps[:batch['chosen_input_ids'].shape[0]]
         rejected_logps = all_logps[batch['chosen_input_ids'].shape[0]:]
         return chosen_logps, rejected_logps
@@ -281,9 +280,11 @@ class BasicTrainer(object):
                 print("Skipping batch due to empty log probabilities...")
                 return torch.tensor(0.0,requires_grad=True), metrics  # Return a default loss value
             # Compute tokenized sequence lengths of chosen and rejected responses
+            
+           # print(self.tokenizer.pad_token_id)
             chosen_lengths = (batch['chosen_input_ids'] != self.tokenizer.pad_token_id).sum(dim=1)
             rejected_lengths = (batch['rejected_input_ids'] != self.tokenizer.pad_token_id).sum(dim=1)
-
+            
             
             with torch.no_grad():
                 reference_chosen_logps, reference_rejected_logps = self.concatenated_forward(self.reference_model, batch)
@@ -323,7 +324,7 @@ class BasicTrainer(object):
 
         elif loss_config.name == 'sft':
             policy_chosen_logits = self.policy(batch['chosen_input_ids'], attention_mask=batch['chosen_attention_mask']).logits.to(torch.float32)
-            policy_chosen_logps = _get_batch_logps(policy_chosen_logits, batch['chosen_labels'], average_log_prob=True)
+            policy_chosen_logps = _get_batch_logps(policy_chosen_logits, batch['chosen_labels'], average_log_prob=False)
 
             losses = -policy_chosen_logps
 
